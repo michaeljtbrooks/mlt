@@ -175,9 +175,14 @@ int mlt_consumer_init(mlt_consumer self, void *child, mlt_profile profile)
         // Default to environment test card
         mlt_properties_set(properties, "test_card", mlt_environment("MLT_TEST_CARD"));
 
-        // Hmm - default all consumers to yuv422 with s16 :-/
+        // Hmm - default all consumers to yuv422 :-/
         priv->image_format = mlt_image_yuv422;
-        priv->audio_format = mlt_audio_s16;
+        // Audio defaults to 32-bit float so that filters run with headroom and
+        // narrowing happens once, at whatever the consumer finally asks for,
+        // rather than at every stage of the chain. Consumers that need integer
+        // samples (DeckLink, NDI) still request them in their own
+        // mlt_frame_get_audio() call, and "mlt_audio_format" overrides this.
+        priv->audio_format = mlt_audio_f32le;
 
         mlt_events_register(properties, "consumer-frame-show");
         mlt_events_register(properties, "consumer-frame-render");
@@ -455,6 +460,8 @@ static void set_audio_format(mlt_consumer self)
             priv->audio_format = mlt_audio_f32le;
         else if (!strcmp(format, "u8"))
             priv->audio_format = mlt_audio_u8;
+        else if (!strcmp(format, "s16"))
+            priv->audio_format = mlt_audio_s16;
     }
 }
 
