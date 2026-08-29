@@ -62,6 +62,38 @@ static void make_audio_level_key(const char *prefix, int channel, char *key, siz
 
 #define AMPTODBFS(n) (log10(n) * 20.0)
 
+/** Read one sample as a normalised value in [-1, 1], whatever the frame format.
+ *
+ * A meter must not dictate the pipeline format. Forcing s16 here re-imposed a
+ * 16-bit bus on every filter below this one, because audio format propagates
+ * backwards through the filter stack, so anything exceeding 0 dBFS upstream was
+ * clipped just to drive a VU meter. Read whatever the consumer asked for
+ * instead. mlt_audio_s32 and mlt_audio_float are planar; the rest interleaved.
+ */
+static inline double sample_to_double(
+    const void *buffer, mlt_audio_format format, int channels, int samples, int c, int s)
+{
+    int i = c + s * channels;
+    int p = c * samples + s;
+
+    switch (format) {
+    case mlt_audio_u8:
+        return (((const uint8_t *) buffer)[i] - 128) / 128.0;
+    case mlt_audio_s16:
+        return ((const int16_t *) buffer)[i] / 32768.0;
+    case mlt_audio_s32le:
+        return ((const int32_t *) buffer)[i] / 2147483648.0;
+    case mlt_audio_f32le:
+        return ((const float *) buffer)[i];
+    case mlt_audio_s32:
+        return ((const int32_t *) buffer)[p] / 2147483648.0;
+    case mlt_audio_float:
+        return ((const float *) buffer)[p];
+    default:
+        return 0.0;
+    }
+}
+
 //----------------------------------------------------------------------------
 // IEC standard dB scaling -- as borrowed from meterbridge (c) Steve Harris
 
@@ -102,7 +134,10 @@ static int filter_get_audio(mlt_frame frame,
     int iec_scale = mlt_properties_get_int(filter_props, "iec_scale");
     int dbPeak = mlt_properties_get_int(filter_props, "dbpeak");
     const char *prefix = mlt_properties_get(filter_props, "prefix");
-    *format = mlt_audio_s16;
+    // Only name a format when the caller has no preference; otherwise pass
+    // theirs straight through so this filter stays out of the negotiation.
+    if (*format == mlt_audio_none)
+        *format = mlt_audio_f32le;
     int error = mlt_frame_get_audio(frame, buffer, format, frequency, channels, samples);
     if (error || !buffer || !buffer[0])
         return error;
@@ -112,28 +147,32 @@ static int filter_get_audio(mlt_frame frame,
     int num_oversample = 0;
     int c, s;
     char key[128];
-    int16_t *pcm = (int16_t *) *buffer;
 
     for (c = 0; c < *channels; c++) {
         double level = 0.0;
         if (dbPeak) {
-            int16_t peakVal = 0;
+            double peakVal = 0.0;
             for (s = 0; s < num_samples; s++) {
-                int16_t sample = abs(pcm[c + s * num_channels]);
+                double sample = fabs(
+                    sample_to_double(*buffer, *format, num_channels, *samples, c, s));
                 if (sample > peakVal)
                     peakVal = sample;
             }
-            if (peakVal == 0)
+            if (peakVal == 0.0)
                 level = -100;
             else
-                level = AMPTODBFS((double) peakVal / (double) INT16_MAX);
+                level = AMPTODBFS(peakVal);
 
             if (iec_scale)
                 level = IEC_Scale(level);
         } else {
             double val = 0;
             for (s = 0; s < num_samples; s++) {
-                double sample = fabs(pcm[c + s * num_channels] / 128.0);
+                // Scaled to the same 0..256 domain the s16 path used, so the
+                // numbers this reports are unchanged.
+                double sample
+                    = fabs(sample_to_double(*buffer, *format, num_channels, *samples, c, s))
+                      * 256.0;
                 val += sample;
                 if (sample == 128)
                     num_oversample++;
